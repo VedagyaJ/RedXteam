@@ -1,507 +1,550 @@
-import express, { type Express, Request, Response } from "express";
+import express, { Request, Response } from "express";
+import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { z } from "zod";
-import { 
-  insertUserSchema, insertProgramSchema, 
-  insertReportSchema, insertReportCommentSchema 
+import {
+  insertUserSchema,
+  insertProgramSchema,
+  insertReportSchema,
+  insertProgramTagSchema,
+  insertResourceSchema,
+  UserType,
+  StatusType,
+  users,
+  programs,
+  reports,
+  programTags,
+  resources,
 } from "@shared/schema";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
-import session from "express-session";
-import passport from "passport";
-import { Strategy as LocalStrategy } from "passport-local";
-import MemoryStore from "memorystore";
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  const httpServer = createServer(app);
-
-  // Setup session
-  const MemoryStoreInstance = MemoryStore(session);
-  app.use(session({
-    secret: process.env.SESSION_SECRET || 'redxteam-secret',
-    resave: false,
-    saveUninitialized: false,
-    cookie: { 
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 24 * 60 * 60 * 1000 // 24 hours
-    },
-    store: new MemoryStoreInstance({
-      checkPeriod: 86400000 // prune expired entries every 24h
-    })
-  }));
-
-  // Setup passport authentication
-  app.use(passport.initialize());
-  app.use(passport.session());
-
-  passport.use(new LocalStrategy(async (username, password, done) => {
-    try {
-      const user = await storage.getUserByUsername(username);
-      
-      if (!user) {
-        return done(null, false, { message: 'Incorrect username.' });
-      }
-      
-      // In a real app, we'd use bcrypt to compare passwords
-      if (user.password !== password) {
-        return done(null, false, { message: 'Incorrect password.' });
-      }
-      
-      return done(null, user);
-    } catch (err) {
-      return done(err);
-    }
-  }));
-
-  passport.serializeUser((user: any, done) => {
-    done(null, user.id);
-  });
-
-  passport.deserializeUser(async (id: number, done) => {
-    try {
-      const user = await storage.getUser(id);
-      done(null, user);
-    } catch (err) {
-      done(err);
-    }
-  });
-
-  // Auth middleware
-  const isAuthenticated = (req: Request, res: Response, next: any) => {
-    if (req.isAuthenticated()) {
-      return next();
-    }
-    res.status(401).json({ message: 'Unauthorized' });
-  };
-
-  const isOrganization = (req: Request, res: Response, next: any) => {
-    if (req.isAuthenticated() && (req.user as any).role === 'organization') {
-      return next();
-    }
-    res.status(403).json({ message: 'Forbidden: Organization role required' });
-  };
-
-  const isHacker = (req: Request, res: Response, next: any) => {
-    if (req.isAuthenticated() && (req.user as any).role === 'hacker') {
-      return next();
-    }
-    res.status(403).json({ message: 'Forbidden: Hacker role required' });
-  };
+  const apiRouter = express.Router();
 
   // Error handling middleware
-  app.use((err: any, req: Request, res: Response, next: any) => {
+  const handleErrors = (err: Error, res: Response) => {
+    console.error("API Error:", err);
+    
     if (err instanceof ZodError) {
-      return res.status(400).json({ error: fromZodError(err).message });
+      const validationError = fromZodError(err);
+      return res.status(400).json({ 
+        message: "Validation Error", 
+        errors: validationError.details 
+      });
     }
-    next(err);
-  });
+    
+    res.status(500).json({ message: err.message || "Internal Server Error" });
+  };
 
-  // Authentication routes
-  app.post('/api/auth/register', async (req, res) => {
+  // Authentication endpoints
+  apiRouter.post("/auth/register", async (req: Request, res: Response) => {
     try {
       const userData = insertUserSchema.parse(req.body);
       
       // Check if username already exists
       const existingUsername = await storage.getUserByUsername(userData.username);
       if (existingUsername) {
-        return res.status(400).json({ message: 'Username already exists' });
+        return res.status(400).json({ message: "Username already taken" });
       }
       
       // Check if email already exists
       const existingEmail = await storage.getUserByEmail(userData.email);
       if (existingEmail) {
-        return res.status(400).json({ message: 'Email already exists' });
+        return res.status(400).json({ message: "Email already registered" });
       }
       
-      // Create user
-      const user = await storage.createUser(userData);
+      const newUser = await storage.createUser(userData);
       
-      // Remove password from response
+      // Don't return the password in the response
+      const { password, ...userWithoutPassword } = newUser;
+      
+      res.status(201).json(userWithoutPassword);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  apiRouter.post("/auth/login", async (req: Request, res: Response) => {
+    try {
+      const { username, password } = req.body;
+      
+      if (!username || !password) {
+        return res.status(400).json({ message: "Username and password are required" });
+      }
+      
+      const user = await storage.getUserByUsername(username);
+      
+      if (!user || user.password !== password) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+      
+      // Don't return the password in the response
+      const { password: _, ...userWithoutPassword } = user;
+      
+      res.status(200).json(userWithoutPassword);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  // User endpoints
+  apiRouter.get("/users/:id", async (req: Request, res: Response) => {
+    try {
+      const userId = parseInt(req.params.id);
+      
+      if (isNaN(userId)) {
+        return res.status(400).json({ message: "Invalid user ID" });
+      }
+      
+      const user = await storage.getUser(userId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Don't return the password in the response
       const { password, ...userWithoutPassword } = user;
       
-      // Log in the user
-      req.login(user, (err) => {
-        if (err) {
-          return res.status(500).json({ message: 'Error during login after registration' });
-        }
-        return res.status(201).json(userWithoutPassword);
-      });
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      return res.status(500).json({ message: 'Error creating user' });
+      res.status(200).json(userWithoutPassword);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.post('/api/auth/login', (req, res, next) => {
-    passport.authenticate('local', (err, user, info) => {
-      if (err) {
-        return next(err);
+  apiRouter.get("/users/type/:userType", async (req: Request, res: Response) => {
+    try {
+      const userType = req.params.userType;
+      
+      if (!Object.values(UserType).includes(userType as any)) {
+        return res.status(400).json({ message: "Invalid user type" });
       }
-      if (!user) {
-        return res.status(401).json({ message: info.message });
-      }
-      req.login(user, (err) => {
-        if (err) {
-          return next(err);
-        }
-        
-        // Remove password from response
+      
+      const users = await storage.getUsersByType(userType);
+      
+      // Remove passwords from response
+      const usersWithoutPasswords = users.map(user => {
         const { password, ...userWithoutPassword } = user;
-        return res.json(userWithoutPassword);
-      });
-    })(req, res, next);
-  });
-
-  app.post('/api/auth/logout', (req, res) => {
-    req.logout(function(err) {
-      if (err) { 
-        return res.status(500).json({ message: 'Error during logout' });
-      }
-      res.json({ message: 'Logged out successfully' });
-    });
-  });
-
-  app.get('/api/auth/session', (req, res) => {
-    if (req.isAuthenticated()) {
-      const { password, ...userWithoutPassword } = req.user as any;
-      return res.json(userWithoutPassword);
-    }
-    res.status(401).json({ message: 'Not logged in' });
-  });
-
-  // Program routes
-  app.get('/api/programs', async (req, res) => {
-    try {
-      const query = req.query.q as string | undefined;
-      let programs;
-      
-      if (query) {
-        programs = await storage.searchPrograms(query);
-      } else {
-        programs = await storage.getAllPrograms();
-      }
-      
-      res.json(programs);
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching programs' });
-    }
-  });
-
-  app.get('/api/programs/:id', async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const program = await storage.getProgram(id);
-      
-      if (!program) {
-        return res.status(404).json({ message: 'Program not found' });
-      }
-      
-      res.json(program);
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching program' });
-    }
-  });
-
-  app.post('/api/programs', isOrganization, async (req, res) => {
-    try {
-      const user = req.user as any;
-      const programData = insertProgramSchema.parse({
-        ...req.body,
-        organizationId: user.id
+        return userWithoutPassword;
       });
       
-      const program = await storage.createProgram(programData);
-      res.status(201).json(program);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      res.status(500).json({ message: 'Error creating program' });
+      res.status(200).json(usersWithoutPasswords);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.patch('/api/programs/:id/status', isOrganization, async (req, res) => {
+  // Program endpoints
+  apiRouter.get("/programs", async (_req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
-      const user = req.user as any;
-      const program = await storage.getProgram(id);
+      const programs = await storage.getPrograms();
       
-      if (!program) {
-        return res.status(404).json({ message: 'Program not found' });
-      }
+      // Fetch organization details and tags for each program
+      const programsWithDetails = await Promise.all(programs.map(async (program) => {
+        const tags = await storage.getProgramTags(program.id);
+        const organization = await storage.getUser(program.organizationId);
+        
+        return {
+          ...program,
+          tags: tags.map(tag => tag.tag),
+          organizationName: organization?.fullName || "Unknown Organization"
+        };
+      }));
       
-      if (program.organizationId !== user.id) {
-        return res.status(403).json({ message: 'Not authorized to update this program' });
-      }
-      
-      const { status } = z.object({ status: z.enum(['active', 'inactive', 'draft']) }).parse(req.body);
-      
-      const updatedProgram = await storage.updateProgramStatus(id, status);
-      res.json(updatedProgram);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      res.status(500).json({ message: 'Error updating program status' });
+      res.status(200).json(programsWithDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.get('/api/programs/organization/:orgId', async (req, res) => {
+  apiRouter.get("/programs/popular", async (req: Request, res: Response) => {
     try {
-      const orgId = parseInt(req.params.orgId);
-      const programs = await storage.getProgramsByOrganization(orgId);
-      res.json(programs);
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching organization programs' });
+      const limit = parseInt(req.query.limit as string) || 3;
+      const popularPrograms = await storage.getPopularPrograms(limit);
+      
+      // Fetch organization details and tags for each program
+      const programsWithDetails = await Promise.all(popularPrograms.map(async (program) => {
+        const tags = await storage.getProgramTags(program.id);
+        const organization = await storage.getUser(program.organizationId);
+        
+        return {
+          ...program,
+          tags: tags.map(tag => tag.tag),
+          organizationName: organization?.fullName || "Unknown Organization"
+        };
+      }));
+      
+      res.status(200).json(programsWithDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  // Report routes
-  app.get('/api/reports/program/:programId', async (req, res) => {
+  apiRouter.get("/programs/:id", async (req: Request, res: Response) => {
     try {
-      const programId = parseInt(req.params.programId);
+      const programId = parseInt(req.params.id);
+      
+      if (isNaN(programId)) {
+        return res.status(400).json({ message: "Invalid program ID" });
+      }
+      
       const program = await storage.getProgram(programId);
       
       if (!program) {
-        return res.status(404).json({ message: 'Program not found' });
+        return res.status(404).json({ message: "Program not found" });
       }
       
-      // Check if user is authorized
-      if (req.isAuthenticated()) {
-        const user = req.user as any;
-        // Allow if user is the organization that owns the program
-        if (user.role === 'organization' && program.organizationId === user.id) {
-          const reports = await storage.getReportsByProgram(programId);
-          return res.json(reports);
-        }
-      }
+      // Fetch tags and organization info
+      const tags = await storage.getProgramTags(programId);
+      const organization = await storage.getUser(program.organizationId);
       
-      res.status(403).json({ message: 'Not authorized to view these reports' });
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching reports' });
+      const programWithDetails = {
+        ...program,
+        tags: tags.map(tag => tag.tag),
+        organizationName: organization?.fullName || "Unknown Organization"
+      };
+      
+      res.status(200).json(programWithDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.get('/api/reports/hacker', isHacker, async (req, res) => {
+  apiRouter.post("/programs", async (req: Request, res: Response) => {
     try {
-      const user = req.user as any;
-      const reports = await storage.getReportsByHacker(user.id);
-      res.json(reports);
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching reports' });
+      const programData = insertProgramSchema.parse(req.body);
+      const { tags, ...programDetails } = programData as any;
+      
+      // Check if organization exists
+      const organization = await storage.getUser(programDetails.organizationId);
+      if (!organization || organization.userType !== UserType.ORGANIZATION) {
+        return res.status(400).json({ message: "Invalid organization ID" });
+      }
+      
+      const newProgram = await storage.createProgram(programDetails);
+      
+      // Add tags if provided
+      if (tags && Array.isArray(tags)) {
+        await Promise.all(tags.map(async (tag: string) => {
+          await storage.createProgramTag({
+            programId: newProgram.id,
+            tag
+          });
+        }));
+      }
+      
+      res.status(201).json(newProgram);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.get('/api/reports/:id', isAuthenticated, async (req, res) => {
+  apiRouter.get("/programs/organization/:organizationId", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
-      const report = await storage.getReport(id);
+      const organizationId = parseInt(req.params.organizationId);
+      
+      if (isNaN(organizationId)) {
+        return res.status(400).json({ message: "Invalid organization ID" });
+      }
+      
+      const programs = await storage.getProgramsByOrganization(organizationId);
+      
+      // Fetch tags for each program
+      const programsWithTags = await Promise.all(programs.map(async (program) => {
+        const tags = await storage.getProgramTags(program.id);
+        return {
+          ...program,
+          tags: tags.map(tag => tag.tag)
+        };
+      }));
+      
+      res.status(200).json(programsWithTags);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  // Report endpoints
+  apiRouter.get("/reports", async (_req: Request, res: Response) => {
+    try {
+      const reports = await storage.getReports();
+      
+      // Fetch program and hacker details for each report
+      const reportsWithDetails = await Promise.all(reports.map(async (report) => {
+        const program = await storage.getProgram(report.programId);
+        const hacker = await storage.getUser(report.hackerId);
+        
+        return {
+          ...report,
+          programTitle: program?.title || "Unknown Program",
+          hackerUsername: hacker?.username || "Unknown Hacker"
+        };
+      }));
+      
+      res.status(200).json(reportsWithDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  apiRouter.get("/reports/:id", async (req: Request, res: Response) => {
+    try {
+      const reportId = parseInt(req.params.id);
+      
+      if (isNaN(reportId)) {
+        return res.status(400).json({ message: "Invalid report ID" });
+      }
+      
+      const report = await storage.getReport(reportId);
       
       if (!report) {
-        return res.status(404).json({ message: 'Report not found' });
+        return res.status(404).json({ message: "Report not found" });
       }
       
-      // Check if user is authorized
-      const user = req.user as any;
-      // Allow if user is the hacker who submitted the report
-      if (user.role === 'hacker' && report.hackerId === user.id) {
-        return res.json(report);
-      }
-      
-      // Allow if user is the organization that owns the program
+      // Fetch program and hacker details
       const program = await storage.getProgram(report.programId);
-      if (user.role === 'organization' && program && program.organizationId === user.id) {
-        return res.json(report);
-      }
+      const hacker = await storage.getUser(report.hackerId);
       
-      res.status(403).json({ message: 'Not authorized to view this report' });
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching report' });
+      const reportWithDetails = {
+        ...report,
+        programTitle: program?.title || "Unknown Program",
+        hackerUsername: hacker?.username || "Unknown Hacker"
+      };
+      
+      res.status(200).json(reportWithDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.post('/api/reports', isHacker, async (req, res) => {
+  apiRouter.post("/reports", async (req: Request, res: Response) => {
     try {
-      const user = req.user as any;
-      const reportData = insertReportSchema.parse({
-        ...req.body,
-        hackerId: user.id
-      });
+      const reportData = insertReportSchema.parse(req.body);
       
-      // Verify program exists
+      // Check if program and hacker exist
       const program = await storage.getProgram(reportData.programId);
       if (!program) {
-        return res.status(404).json({ message: 'Program not found' });
+        return res.status(400).json({ message: "Invalid program ID" });
       }
       
-      // Check if program is active
-      if (program.status !== 'active') {
-        return res.status(400).json({ message: 'Cannot submit reports to inactive programs' });
+      const hacker = await storage.getUser(reportData.hackerId);
+      if (!hacker || hacker.userType !== UserType.HACKER) {
+        return res.status(400).json({ message: "Invalid hacker ID" });
       }
       
-      const report = await storage.createReport(reportData);
-      res.status(201).json(report);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      res.status(500).json({ message: 'Error creating report' });
+      const newReport = await storage.createReport(reportData);
+      
+      res.status(201).json(newReport);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.patch('/api/reports/:id/status', isOrganization, async (req, res) => {
+  apiRouter.put("/reports/:id/status", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
-      const user = req.user as any;
-      const report = await storage.getReport(id);
+      const reportId = parseInt(req.params.id);
+      const { status, rewardAmount } = req.body;
       
-      if (!report) {
-        return res.status(404).json({ message: 'Report not found' });
+      if (isNaN(reportId)) {
+        return res.status(400).json({ message: "Invalid report ID" });
       }
       
-      // Verify the org owns the program
-      const program = await storage.getProgram(report.programId);
-      if (!program || program.organizationId !== user.id) {
-        return res.status(403).json({ message: 'Not authorized to update this report' });
+      if (!Object.values(StatusType).includes(status as any)) {
+        return res.status(400).json({ message: "Invalid status" });
       }
       
-      const { status, triageNotes } = z.object({
-        status: z.enum(['pending', 'triaging', 'accepted', 'rejected', 'duplicate', 'fixed']),
-        triageNotes: z.string().optional()
-      }).parse(req.body);
-      
-      const updatedReport = await storage.updateReportStatus(id, status, triageNotes);
-      
-      // Increase hacker reputation if report is accepted
-      if (status === 'accepted' && report.status !== 'accepted') {
-        const reputationPoints = getReputationPoints(report.severity);
-        await storage.updateUserReputation(report.hackerId, reputationPoints);
-      }
-      
-      res.json(updatedReport);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      res.status(500).json({ message: 'Error updating report status' });
-    }
-  });
-
-  app.post('/api/reports/:id/reward', isOrganization, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const user = req.user as any;
-      const report = await storage.getReport(id);
-      
-      if (!report) {
-        return res.status(404).json({ message: 'Report not found' });
-      }
-      
-      // Verify the org owns the program
-      const program = await storage.getProgram(report.programId);
-      if (!program || program.organizationId !== user.id) {
-        return res.status(403).json({ message: 'Not authorized to reward this report' });
-      }
-      
-      const { amount } = z.object({
-        amount: z.number().min(0)
-      }).parse(req.body);
-      
-      const updatedReport = await storage.assignReward(id, amount);
-      res.json(updatedReport);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      res.status(500).json({ message: 'Error assigning reward' });
-    }
-  });
-
-  // Report comments
-  app.get('/api/reports/:reportId/comments', isAuthenticated, async (req, res) => {
-    try {
-      const reportId = parseInt(req.params.reportId);
       const report = await storage.getReport(reportId);
       
       if (!report) {
-        return res.status(404).json({ message: 'Report not found' });
+        return res.status(404).json({ message: "Report not found" });
       }
       
-      // Check if user is authorized
-      const user = req.user as any;
-      // Allow if user is the hacker who submitted the report
-      if (user.role === 'hacker' && report.hackerId === user.id) {
-        const comments = await storage.getReportComments(reportId);
-        return res.json(comments);
+      const updateData: any = { status };
+      
+      // Update reward amount if provided and status is ACCEPTED
+      if (status === StatusType.ACCEPTED && rewardAmount !== undefined) {
+        updateData.rewardAmount = rewardAmount;
       }
       
-      // Allow if user is the organization that owns the program
-      const program = await storage.getProgram(report.programId);
-      if (user.role === 'organization' && program && program.organizationId === user.id) {
-        const comments = await storage.getReportComments(reportId);
-        return res.json(comments);
-      }
+      const updatedReport = await storage.updateReport(reportId, updateData);
       
-      res.status(403).json({ message: 'Not authorized to view these comments' });
-    } catch (error) {
-      res.status(500).json({ message: 'Error fetching comments' });
+      res.status(200).json(updatedReport);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  app.post('/api/reports/:reportId/comments', isAuthenticated, async (req, res) => {
+  apiRouter.get("/reports/program/:programId", async (req: Request, res: Response) => {
     try {
-      const reportId = parseInt(req.params.reportId);
-      const user = req.user as any;
-      const report = await storage.getReport(reportId);
+      const programId = parseInt(req.params.programId);
       
-      if (!report) {
-        return res.status(404).json({ message: 'Report not found' });
+      if (isNaN(programId)) {
+        return res.status(400).json({ message: "Invalid program ID" });
       }
       
-      // Verify the user is either the hacker or the org
-      let authorized = false;
-      if (user.role === 'hacker' && report.hackerId === user.id) {
-        authorized = true;
-      } else {
+      const reports = await storage.getReportsByProgram(programId);
+      
+      // Fetch hacker details for each report
+      const reportsWithHackerDetails = await Promise.all(reports.map(async (report) => {
+        const hacker = await storage.getUser(report.hackerId);
+        
+        return {
+          ...report,
+          hackerUsername: hacker?.username || "Unknown Hacker"
+        };
+      }));
+      
+      res.status(200).json(reportsWithHackerDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  apiRouter.get("/reports/hacker/:hackerId", async (req: Request, res: Response) => {
+    try {
+      const hackerId = parseInt(req.params.hackerId);
+      
+      if (isNaN(hackerId)) {
+        return res.status(400).json({ message: "Invalid hacker ID" });
+      }
+      
+      const reports = await storage.getReportsByHacker(hackerId);
+      
+      // Fetch program details for each report
+      const reportsWithProgramDetails = await Promise.all(reports.map(async (report) => {
         const program = await storage.getProgram(report.programId);
-        if (user.role === 'organization' && program && program.organizationId === user.id) {
-          authorized = true;
-        }
-      }
+        
+        return {
+          ...report,
+          programTitle: program?.title || "Unknown Program"
+        };
+      }));
       
-      if (!authorized) {
-        return res.status(403).json({ message: 'Not authorized to comment on this report' });
-      }
-      
-      const commentData = insertReportCommentSchema.parse({
-        ...req.body,
-        reportId,
-        userId: user.id
-      });
-      
-      const comment = await storage.createReportComment(commentData);
-      res.status(201).json(comment);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return res.status(400).json({ error: fromZodError(error).message });
-      }
-      res.status(500).json({ message: 'Error creating comment' });
+      res.status(200).json(reportsWithProgramDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
   });
 
-  // Helper function to determine reputation points based on severity
-  function getReputationPoints(severity: string): number {
-    switch (severity) {
-      case 'critical': return 50;
-      case 'high': return 30;
-      case 'medium': return 15;
-      case 'low': return 5;
-      default: return 1;
+  // Resource endpoints
+  apiRouter.get("/resources", async (_req: Request, res: Response) => {
+    try {
+      const resources = await storage.getResources();
+      
+      // Fetch author details for each resource
+      const resourcesWithAuthorDetails = await Promise.all(resources.map(async (resource) => {
+        const author = await storage.getUser(resource.authorId);
+        
+        return {
+          ...resource,
+          authorName: author?.fullName || "Unknown Author"
+        };
+      }));
+      
+      res.status(200).json(resourcesWithAuthorDetails);
+    } catch (err) {
+      handleErrors(err as Error, res);
     }
-  }
+  });
+
+  apiRouter.post("/resources", async (req: Request, res: Response) => {
+    try {
+      const resourceData = insertResourceSchema.parse(req.body);
+      
+      // Check if author exists
+      const author = await storage.getUser(resourceData.authorId);
+      if (!author) {
+        return res.status(400).json({ message: "Invalid author ID" });
+      }
+      
+      const newResource = await storage.createResource(resourceData);
+      
+      res.status(201).json(newResource);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  // Dashboard stats endpoints
+  apiRouter.get("/stats/hacker/:hackerId", async (req: Request, res: Response) => {
+    try {
+      const hackerId = parseInt(req.params.hackerId);
+      
+      if (isNaN(hackerId)) {
+        return res.status(400).json({ message: "Invalid hacker ID" });
+      }
+      
+      const hacker = await storage.getUser(hackerId);
+      
+      if (!hacker || hacker.userType !== UserType.HACKER) {
+        return res.status(404).json({ message: "Hacker not found" });
+      }
+      
+      const stats = await storage.getHackerStats(hackerId);
+      
+      res.status(200).json(stats);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  apiRouter.get("/stats/organization/:organizationId", async (req: Request, res: Response) => {
+    try {
+      const organizationId = parseInt(req.params.organizationId);
+      
+      if (isNaN(organizationId)) {
+        return res.status(400).json({ message: "Invalid organization ID" });
+      }
+      
+      const organization = await storage.getUser(organizationId);
+      
+      if (!organization || organization.userType !== UserType.ORGANIZATION) {
+        return res.status(404).json({ message: "Organization not found" });
+      }
+      
+      const stats = await storage.getOrganizationStats(organizationId);
+      
+      res.status(200).json(stats);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  // Leaderboard endpoint
+  apiRouter.get("/leaderboard", async (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 10;
+      const topHackers = await storage.getTopHackers(limit);
+      
+      // Calculate additional stats for each hacker
+      const hackersWithStats = await Promise.all(topHackers.map(async (hacker) => {
+        const reports = await storage.getReportsByHacker(hacker.id);
+        
+        // Calculate total earnings
+        const earnings = reports.reduce((total, report) => {
+          return total + (report.rewardAmount || 0);
+        }, 0);
+        
+        // Don't include password in response
+        const { password, ...hackerWithoutPassword } = hacker;
+        
+        return {
+          ...hackerWithoutPassword,
+          reportsCount: reports.length,
+          earnings
+        };
+      }));
+      
+      res.status(200).json(hackersWithStats);
+    } catch (err) {
+      handleErrors(err as Error, res);
+    }
+  });
+
+  // Register the API router
+  app.use("/api", apiRouter);
+
+  const httpServer = createServer(app);
 
   return httpServer;
 }

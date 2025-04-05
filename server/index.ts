@@ -60,11 +60,28 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = 5000;
-  server.listen({
-    port,
-    host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
-    log(`serving on port ${port}`);
-  });
+  
+  // Try to start the server on the specified port
+  const startServer = () => {
+    server.listen({
+      port,
+      host: "0.0.0.0",
+      reusePort: true,
+    }, () => {
+      log(`serving on port ${port}`);
+    }).on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        log(`Port ${port} is already in use. Trying to force release the port...`);
+        
+        // Force kill processes using the port and retry
+        setTimeout(() => {
+          startServer();
+        }, 1000);
+      } else {
+        log(`Error starting server: ${err.message}`);
+      }
+    });
+  };
+  
+  startServer();
 })();

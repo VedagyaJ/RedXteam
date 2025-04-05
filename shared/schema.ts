@@ -1,106 +1,160 @@
-import { pgTable, text, serial, integer, timestamp, boolean, json, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, timestamp, boolean, doublePrecision } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Enums for various status and type options
-export const userRoleEnum = pgEnum('user_role', ['organization', 'hacker']);
-export const programStatusEnum = pgEnum('program_status', ['active', 'inactive', 'draft']);
-export const severityEnum = pgEnum('severity', ['critical', 'high', 'medium', 'low', 'informational']);
-export const reportStatusEnum = pgEnum('report_status', ['pending', 'triaging', 'accepted', 'rejected', 'duplicate', 'fixed']);
+// User types
+export const UserType = {
+  HACKER: "hacker",
+  ORGANIZATION: "organization",
+} as const;
 
-// Users table - for both organizations and hackers
+export type UserTypeEnum = typeof UserType[keyof typeof UserType];
+
+// Severity types
+export const SeverityType = {
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high",
+  CRITICAL: "critical",
+} as const;
+
+export type SeverityTypeEnum = typeof SeverityType[keyof typeof SeverityType];
+
+// Status types
+export const StatusType = {
+  PENDING: "pending",
+  ACCEPTED: "accepted",
+  REJECTED: "rejected",
+  DUPLICATE: "duplicate",
+  FIXED: "fixed",
+} as const;
+
+export type StatusTypeEnum = typeof StatusType[keyof typeof StatusType];
+
+// Users table
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
   email: text("email").notNull().unique(),
-  name: text("name").notNull(),
-  role: userRoleEnum("role").notNull(),
+  fullName: text("full_name").notNull(),
+  userType: text("user_type").notNull(),
   bio: text("bio"),
-  profilePicture: text("profile_picture"),
-  skills: text("skills").array(),
+  avatarUrl: text("avatar_url"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
   reputation: integer("reputation").default(0),
-  // Organization specific fields
-  companyName: text("company_name"),
-  companyUrl: text("company_url"),
-  industry: text("industry"),
 });
 
-export const insertUserSchema = createInsertSchema(users).omit({
-  id: true,
-  reputation: true,
-});
-
-// Programs table - bug bounty programs created by organizations
+// Programs table
 export const programs = pgTable("programs", {
   id: serial("id").primaryKey(),
-  organizationId: integer("organization_id").notNull().references(() => users.id),
   title: text("title").notNull(),
   description: text("description").notNull(),
+  organizationId: integer("organization_id").notNull(),
+  minBounty: integer("min_bounty").notNull(),
+  maxBounty: integer("max_bounty").notNull(),
   scope: text("scope").notNull(),
-  outOfScope: text("out_of_scope"),
-  rules: text("rules"),
-  status: programStatusEnum("status").notNull().default("draft"),
-  rewards: json("rewards").notNull(), // JSON structure for different severity levels
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-  logo: text("logo"),
-  industry: text("industry"),
-  technologies: text("technologies").array(),
+  rules: text("rules").notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  industry: text("industry").notNull(),
+  responseTime: integer("response_time").default(48),
+});
+
+// Reports table
+export const reports = pgTable("reports", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  hackerId: integer("hacker_id").notNull(),
+  programId: integer("program_id").notNull(),
+  severity: text("severity").notNull(),
+  status: text("status").default("pending").notNull(),
+  rewardAmount: integer("reward_amount"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  stepsToReproduce: text("steps_to_reproduce").notNull(),
+  impact: text("impact").notNull(),
+});
+
+// Program tags table
+export const programTags = pgTable("program_tags", {
+  id: serial("id").primaryKey(),
+  programId: integer("program_id").notNull(),
+  tag: text("tag").notNull(),
+});
+
+// Resources table
+export const resources = pgTable("resources", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  content: text("content").notNull(),
+  authorId: integer("author_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  category: text("category").notNull(),
+});
+
+// Insert schemas using drizzle-zod
+export const insertUserSchema = createInsertSchema(users).omit({
+  id: true,
+  createdAt: true,
+  reputation: true,
 });
 
 export const insertProgramSchema = createInsertSchema(programs).omit({
   id: true,
   createdAt: true,
-  updatedAt: true,
-});
-
-// Reports table - vulnerability reports submitted by hackers
-export const reports = pgTable("reports", {
-  id: serial("id").primaryKey(),
-  programId: integer("program_id").notNull().references(() => programs.id),
-  hackerId: integer("hacker_id").notNull().references(() => users.id),
-  title: text("title").notNull(),
-  description: text("description").notNull(),
-  stepsToReproduce: text("steps_to_reproduce").notNull(),
-  severity: severityEnum("severity").notNull(),
-  impact: text("impact").notNull(),
-  status: reportStatusEnum("status").notNull().default("pending"),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-  attachments: text("attachments").array(),
-  rewardAmount: integer("reward_amount"),
-  triageNotes: text("triage_notes"),
+  isActive: true,
+  responseTime: true,
 });
 
 export const insertReportSchema = createInsertSchema(reports).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+  status: true,
   rewardAmount: true,
-  triageNotes: true,
 });
 
-// Comments on reports
-export const reportComments = pgTable("report_comments", {
-  id: serial("id").primaryKey(),
-  reportId: integer("report_id").notNull().references(() => reports.id),
-  userId: integer("user_id").notNull().references(() => users.id),
-  content: text("content").notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
+export const insertProgramTagSchema = createInsertSchema(programTags).omit({
+  id: true,
 });
 
-export const insertReportCommentSchema = createInsertSchema(reportComments).omit({
+export const insertResourceSchema = createInsertSchema(resources).omit({
   id: true,
   createdAt: true,
 });
 
-// Export types
-export type User = typeof users.$inferSelect;
+// Types
 export type InsertUser = z.infer<typeof insertUserSchema>;
-export type Program = typeof programs.$inferSelect;
+export type User = typeof users.$inferSelect;
+
 export type InsertProgram = z.infer<typeof insertProgramSchema>;
-export type Report = typeof reports.$inferSelect;
+export type Program = typeof programs.$inferSelect;
+
 export type InsertReport = z.infer<typeof insertReportSchema>;
-export type ReportComment = typeof reportComments.$inferSelect;
-export type InsertReportComment = z.infer<typeof insertReportCommentSchema>;
+export type Report = typeof reports.$inferSelect;
+
+export type InsertProgramTag = z.infer<typeof insertProgramTagSchema>;
+export type ProgramTag = typeof programTags.$inferSelect;
+
+export type InsertResource = z.infer<typeof insertResourceSchema>;
+export type Resource = typeof resources.$inferSelect;
+
+// Extended schemas for API responses
+export const programWithTagsSchema = z.object({
+  ...createInsertSchema(programs).shape,
+  tags: z.array(z.string()),
+  organizationName: z.string(),
+});
+
+export type ProgramWithTags = z.infer<typeof programWithTagsSchema>;
+
+export const reportWithDetailsSchema = z.object({
+  ...createInsertSchema(reports).shape,
+  programTitle: z.string(),
+  hackerUsername: z.string(),
+});
+
+export type ReportWithDetails = z.infer<typeof reportWithDetailsSchema>;
